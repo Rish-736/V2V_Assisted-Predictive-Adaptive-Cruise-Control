@@ -144,6 +144,7 @@ docs/
   CONTROL_DESIGN.md    the control theory, with the derivations
   WIRING.md            pinout, wiring, and the ways to destroy a board
   REVIEW_CHECKLIST.md  what to have ready for each graded review
+  ONBOARDING_PROMPT.md paste-into-a-new-session brief covering the whole repo
 ```
 
 ### `firmware/common/` and the generated copies
@@ -249,12 +250,6 @@ examiner will actually ask.
 | String stability for 3+ vehicles | not started (natural extension) |
 
 See `docs/REVIEW_CHECKLIST.md` for what to have ready at each review.
-
----
-
-## Contributor
-
-Rishit Sinha (24BEC0529)
 
 **SDG alignment:** primary SDG 3 (Target 3.6 — reduce road traffic deaths through
 earlier, predictive braking); secondary SDG 9 (low-cost embedded V2V).
