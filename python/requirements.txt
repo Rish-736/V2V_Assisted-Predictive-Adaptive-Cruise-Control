@@ -1,0 +1,14 @@
+# Core -- needed for the dashboard, twin and analysis scripts
+matplotlib>=3.7
+numpy>=1.24
+
+# Serial telemetry from the ESP32 nodes
+pyserial>=3.5
+
+# Optional but recommended
+# scipy      : better least-squares fit in sysid_fit.py (falls back to a
+#              grid search without it)
+# control    : root locus in design_control.py; the free stand-in for
+#              MATLAB's Control System Toolbox
+scipy>=1.10
+control>=0.9.4

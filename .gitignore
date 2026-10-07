@@ -1,0 +1,45 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---- Arduino / PlatformIO build output ----
+.pio/
+build/
+*.elf
+*.bin
+*.hex
+*.map
+
+# ---- MATLAB ----
+*.asv
+*.mex*
+slprj/
+
+# ---- Captured runs ----
+# Real telemetry and step-response captures are run-specific and can be
+# large. Keep them out of the repo by default; commit a specific run
+# deliberately with `git add -f data/run_good.csv` if it is one you want
+# to keep as a reference or replay at a review.
+data/step.csv
+data/run_*.csv
+data/*_raw.csv
+data/plant_params.json
+data/plant_params_matlab.json
+
+# The synthetic example data, the fitted example params and the generated
+# figures ARE tracked on purpose -- docs/ and data/README.md refer to them,
+# and they let someone clone the repo and see real output without any
+# hardware. See data/README.md.
