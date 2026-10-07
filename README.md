@@ -252,9 +252,9 @@ See `docs/REVIEW_CHECKLIST.md` for what to have ready at each review.
 
 ---
 
-## Team
+## Contributor
 
-Rishit Sinha (24BEC0529) · Rupsa Mittra (24BEC0176) · Rishika Kapoor (24BEC0455) · 4th member TBD
+Rishit Sinha (24BEC0529)
 
 **SDG alignment:** primary SDG 3 (Target 3.6 — reduce road traffic deaths through
 earlier, predictive braking); secondary SDG 9 (low-cost embedded V2V).
