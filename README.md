@@ -145,6 +145,7 @@ docs/
   WIRING.md            pinout, wiring, and the ways to destroy a board
   REVIEW_CHECKLIST.md  what to have ready for each graded review
   ONBOARDING_PROMPT.md paste-into-a-new-session brief covering the whole repo
+  BUILD_PLAN.md        5-day track-demonstrator build: BOM, wiring, schedule
 ```
 
 ### `firmware/common/` and the generated copies
