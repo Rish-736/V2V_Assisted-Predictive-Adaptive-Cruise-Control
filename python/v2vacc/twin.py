@@ -153,7 +153,7 @@ def lead_scenario(t: float, *, cruise: float = 0.40, t_start: float = 3.0,
     if t < t_brake1:
         return cruise, False
     if t < t_resume:
-        return 0.18, False
+        return cruise * 0.45, False
     if t < t_brake_hard:
         return cruise, False
     if t < t_restart:

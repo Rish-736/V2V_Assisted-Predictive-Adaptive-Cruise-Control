@@ -24,17 +24,19 @@ from __future__ import annotations
 
 import csv
 import io
-from dataclasses import dataclass, asdict, fields
+from dataclasses import MISSING, dataclass, asdict, fields
 from pathlib import Path
 
 __all__ = [
     "FollowerRecord", "LeadRecord", "CommentRecord",
     "parse_line", "parse_file", "records_to_csv",
-    "MODE_NAMES", "LINK_NAMES",
+    "MODE_NAMES", "LINK_NAMES", "SCENARIO_NAMES",
 ]
 
 MODE_NAMES = ["STANDBY", "CRUISE", "FOLLOW", "PREDICT", "EMERG", "FAULT"]
 LINK_NAMES = ["OK", "DEGRADED", "LOST"]
+# must match ScenarioId in firmware/common/scenario.h
+SCENARIO_NAMES = ["MANUAL", "FOLLOW", "PREDICT", "EMERG-STOP", "COMM-LOSS"]
 
 
 # ---------------------------------------------------------------------
@@ -58,10 +60,16 @@ class FollowerRecord:
     pkt_good: int
     pkt_lost: int
     pkt_bad: int
+    scn: int = 0
 
     @property
     def t(self) -> float:
         return self.t_ms / 1000.0
+
+    @property
+    def scn_name(self) -> str:
+        return (SCENARIO_NAMES[self.scn]
+                if 0 <= self.scn < len(SCENARIO_NAMES) else "?")
 
     @property
     def mode_name(self) -> str:
@@ -90,13 +98,23 @@ class LeadRecord:
     duty: float
     braking: int
     hazard: int
+    scn: int
+    running: int
+    throttle: float
+    tx_on: int
     seq: int
     tx_ok: int
     tx_fail: int
+    tx_suppressed: int = 0
 
     @property
     def t(self) -> float:
         return self.t_ms / 1000.0
+
+    @property
+    def scn_name(self) -> str:
+        return (SCENARIO_NAMES[self.scn]
+                if 0 <= self.scn < len(SCENARIO_NAMES) else "?")
 
     @property
     def tx_fail_pct(self) -> float:
@@ -111,13 +129,25 @@ class CommentRecord:
 
 # ---------------------------------------------------------------------
 _INT_FIELDS = {"t_ms", "mode", "link", "brake", "pkt_good", "pkt_lost",
-               "pkt_bad", "braking", "hazard", "seq", "tx_ok", "tx_fail"}
+               "pkt_bad", "braking", "hazard", "seq", "tx_ok", "tx_fail",
+               "scn", "running", "tx_on", "tx_suppressed"}
 
 
 def _build(cls, parts: list[str]):
-    names = [f.name for f in fields(cls)]
-    if len(parts) < len(names):
+    """Build a record from CSV fields.
+
+    Fields with defaults are optional, so a log captured before a column
+    was added still parses. That matters because recorded runs outlive
+    firmware revisions, and a golden run from Monday must still replay on
+    Wednesday.
+    """
+    flds = fields(cls)
+    names = [f.name for f in flds]
+    required = sum(1 for f in flds
+                   if f.default is MISSING and f.default_factory is MISSING)
+    if len(parts) < required:
         return None
+    names = names[:len(parts)]
     kwargs = {}
     for name, raw in zip(names, parts):
         try:

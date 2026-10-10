@@ -1,26 +1,40 @@
 // =====================================================================
-//  lead_node.ino  --  LEAD VEHICLE
+//  lead_node.ino  --  LEAD VEHICLE / DRIVER'S CONSOLE
 //  V2V-Assisted Predictive Adaptive Cruise Control  /  BECE302L
 //
-//  Responsibilities
-//   1. Drive its own speed to a scripted profile (the "scenario"), so
-//      every demo run is byte-for-byte repeatable and the digital-twin
-//      comparison is meaningful.
-//   2. Estimate its own acceleration and decide when it is BRAKING.
-//   3. Broadcast {speed, accel, flags, seq} over ESP-NOW at 20 Hz.
-//   4. Stream telemetry to the laptop over serial.
+//  WHY THIS NODE HAS NO MOTOR
+//  --------------------------
+//  The lead vehicle's only job in this system is to TELL the follower what
+//  it is doing. Nothing in the follower's control law depends on the lead
+//  having real wheels. So this node runs its vehicle physics in SIM_PLANT
+//  and is built instead as a driver's console:
 //
-//  WHY BROADCAST INSTEAD OF A UNICAST MAC PEER
-//  -------------------------------------------
-//  We send to FF:FF:FF:FF:FF:FF. Two reasons:
-//   * Practical: no MAC addresses to look up, type in and keep in sync.
-//     Flash both boards and they talk. One less thing to break at 2 a.m.
-//     before a review.
-//   * Correct: real V2V (DSRC / C-V2X) Basic Safety Messages ARE
-//     broadcast. A braking announcement is addressed to every vehicle in
-//     range, not to one negotiated peer. Our link mirrors the real thing.
-//   Set V2V_USE_UNICAST to 1 if you want per-packet delivery callbacks
-//   for a link-reliability experiment.
+//      potentiometer  -> accelerator
+//      brake button   -> brake pedal
+//      two buttons    -> select and run a demo scenario
+//      OLED           -> the lead's dashboard
+//
+//  That halves the drivetrain hardware for the demo while leaving every
+//  part of the thing being demonstrated -- the radio link, the follower's
+//  closed-loop control, the sensing, the state machine -- completely real.
+//  It is the same reasoning a hardware-in-the-loop bench uses: you do not
+//  build a second vehicle in order to test a follower.
+//
+//  Responsibilities
+//   1. Work out the commanded lead speed, from the scenario script or from
+//      the throttle pot in manual mode.
+//   2. Run a PID speed loop against its (simulated) plant, so the speed it
+//      broadcasts has realistic dynamics rather than being a step.
+//   3. Estimate its own acceleration and decide when it is BRAKING.
+//   4. Broadcast {speed, accel, flags, scenario, seq} over ESP-NOW at 20 Hz
+//      -- unless the active scenario has deliberately silenced the radio.
+//   5. Drive the console OLED and stream telemetry to the laptop.
+//
+//  BROADCAST, NOT UNICAST
+//  We send to FF:FF:FF:FF:FF:FF. Practical: no MAC addresses to look up,
+//  type in and keep in sync. Correct: real V2V (DSRC / C-V2X) Basic Safety
+//  Messages ARE broadcast, because a braking announcement is addressed to
+//  every vehicle in range, not to one negotiated peer.
 // =====================================================================
 
 #include <esp_now.h>
@@ -32,6 +46,8 @@
 #include "filters.h"
 #include "pid.h"
 #include "vehicle_io.h"
+#include "scenario.h"
+#include "hmi.h"
 
 // ---------------------------------------------------------------------
 //  Link configuration
@@ -53,42 +69,22 @@ static PID            speedPid;
 static Differentiator accelEst;
 static LeadLag        leadLag;
 
-static uint32_t seqCounter   = 0;
-static uint32_t txOk         = 0;
-static uint32_t txFail       = 0;
+static Scenario       scn;
+static Throttle       throttle;
+static Button         btnBrake, btnScnNext, btnScnRun;
 
-static uint32_t lastCtrlUs   = 0;
-static uint32_t lastTxMs     = 0;
-static uint32_t lastTelemMs  = 0;
-static uint32_t bootMs       = 0;
+static uint32_t seqCounter  = 0;
+static uint32_t txOk        = 0;
+static uint32_t txFail      = 0;
+static uint32_t txSuppressed = 0;   // packets NOT sent during radio silence
 
-static float    vTarget      = 0.0f;
-static float    vTargetRaw   = 0.0f;
-static bool     flagBraking  = false;
-static bool     flagHazard   = false;
+static uint32_t lastCtrlUs  = 0;
+static uint32_t lastTxMs    = 0;
+static uint32_t lastTelemMs = 0;
+static uint32_t lastHmiMs   = 0;
 
-// ---------------------------------------------------------------------
-//  Scenario: the scripted speed profile the lead vehicle follows.
-//  Returns the commanded speed [m/s] for a given time since boot.
-//
-//   0 ---3s--- stopped
-//   3 --12s--- cruise 0.40
-//  12 --17s--- gentle slowdown to 0.18   <- tests predictive following
-//  17 --24s--- back to cruise
-//  24 --32s--- EMERGENCY STOP to 0       <- the headline demo
-//  32 --42s--- recover to cruise, then loop
-// ---------------------------------------------------------------------
-static float scenarioSpeed(float t, bool *hazard) {
-  *hazard = false;
-  if (SCENARIO_T_LOOP > 0.0f) t = fmodf(t, SCENARIO_T_LOOP);
-
-  if (t < SCENARIO_T_START)       return 0.0f;
-  if (t < SCENARIO_T_BRAKE1)      return SCENARIO_CRUISE_MPS;
-  if (t < SCENARIO_T_RESUME)      return 0.18f;
-  if (t < SCENARIO_T_BRAKE_HARD)  return SCENARIO_CRUISE_MPS;
-  if (t < SCENARIO_T_RESTART)   { *hazard = true; return 0.0f; }
-  return SCENARIO_CRUISE_MPS;
-}
+static float    vTarget     = 0.0f;
+static bool     flagBraking = false;
 
 // ---------------------------------------------------------------------
 //  ESP-NOW send callback -- lets us report a real TX success rate
@@ -124,20 +120,53 @@ static bool v2vBegin(void) {
 }
 
 static void v2vBroadcast(float speed, float accel, bool braking, bool hazard) {
+  // RADIO SILENCE. This is how SCN_COMM_LOSS works: the lead carries on
+  // driving perfectly normally but stops announcing itself. Nothing is
+  // wrong with the lead -- the follower has simply lost its feedforward
+  // channel, and must notice and widen its time gap on its own.
+  if (!scn.tx_enabled) { txSuppressed++; return; }
+
   V2VPacket p = {};
   p.seq        = ++seqCounter;
   p.t_ms       = millis();
   p.speed_mps  = speed;
   p.accel_mps2 = accel;
+  p.scenario   = (uint8_t)scn.id;
   p.flags      = 0;
-  if (braking)                       p.flags |= V2V_FLAG_BRAKING;
-  if (hazard)                        p.flags |= V2V_FLAG_HAZARD;
-  if (speed > V_STANDSTILL_MPS)      p.flags |= V2V_FLAG_MOVING;
+  if (braking)                  p.flags |= V2V_FLAG_BRAKING;
+  if (hazard)                   p.flags |= V2V_FLAG_HAZARD;
+  if (speed > V_STANDSTILL_MPS) p.flags |= V2V_FLAG_MOVING;
 #if SIM_PLANT
   p.flags |= V2V_FLAG_SIM;
 #endif
   v2v_seal(&p, V2V_NODE_LEAD);
   esp_now_send(peerMac, (const uint8_t *)&p, V2V_PACKET_SIZE);
+}
+
+// ---------------------------------------------------------------------
+//  Serial commands, so scenarios can also be driven from the dashboard.
+//  The physical buttons are the showpiece; this is the backup path, and it
+//  means a dead button does not cost you a scenario in the review.
+//    0..4  select that scenario        r  run / restart
+//    n     next scenario               s  stop
+// ---------------------------------------------------------------------
+static void pollSerial(void) {
+  while (Serial.available()) {
+    const char c = (char)Serial.read();
+    if (c >= '0' && c < ('0' + SCN_COUNT)) {
+      scn_select(&scn, (ScenarioId)(c - '0'));
+      Serial.printf("# scenario -> %s\n", scn_name(&scn));
+    } else if (c == 'n') {
+      scn_next(&scn);
+      Serial.printf("# scenario -> %s\n", scn_name(&scn));
+    } else if (c == 'r') {
+      scn_start(&scn);
+      Serial.printf("# run %s\n", scn_name(&scn));
+    } else if (c == 's') {
+      scn_select(&scn, scn.id);
+      Serial.println("# stop");
+    }
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -147,10 +176,11 @@ void setup() {
 
   Serial.println();
   Serial.println("# ==============================================");
-  Serial.println("# V2V Predictive ACC  --  LEAD NODE");
+  Serial.println("# V2V Predictive ACC  --  LEAD NODE / CONSOLE");
   Serial.printf ("# build: SIM_PLANT=%d  ctrl=%d Hz  tx=%d Hz\n",
                  SIM_PLANT, CTRL_HZ, V2V_TX_HZ);
   Serial.printf ("# my MAC: %s\n", WiFi.macAddress().c_str());
+  Serial.println("# keys: 0-4 select scenario, n next, r run, s stop");
   Serial.println("# ==============================================");
 
   vio_begin();
@@ -159,6 +189,14 @@ void setup() {
   diff_init(&accelEst, 3.0f, CTRL_DT);
   ll_init(&leadLag, LL_B0, LL_B1, LL_A1);
 
+  scn_init(&scn);
+  thr_init(&throttle);
+  btn_init(&btnBrake,   PIN_LEAD_BRAKE);
+  btn_init(&btnScnNext, PIN_LEAD_SCN_NEXT);
+  btn_init(&btnScnRun,  PIN_LEAD_SCN_RUN);
+
+  hmi_begin("LEAD CONSOLE");
+
   if (!v2vBegin()) {
     Serial.println("# FATAL: ESP-NOW init failed");
     while (true) { vio_status_led(true); delay(100); vio_status_led(false); delay(100); }
@@ -166,14 +204,16 @@ void setup() {
   Serial.printf("# ESP-NOW up on channel %d, peer %s\n",
                 V2V_WIFI_CHANNEL,
                 (peerMac[0] == 0xFF) ? "BROADCAST" : "unicast");
-  Serial.println("# TELEM_HDR,t_ms,v,v_tgt,accel,duty,braking,hazard,seq,tx_ok,tx_fail");
+  Serial.println("# TELEM_HDR,t_ms,v,v_tgt,accel,duty,braking,hazard,"
+                 "scn,running,throttle,tx_on,seq,tx_ok,tx_fail,tx_suppressed");
 
-  bootMs      = millis();
-  lastCtrlUs  = micros();
+  lastCtrlUs = micros();
 }
 
 // ---------------------------------------------------------------------
 void loop() {
+  pollSerial();
+
   const uint32_t nowUs = micros();
 
   // ===== fixed-rate control task =====================================
@@ -181,59 +221,80 @@ void loop() {
     const float dt = (float)(nowUs - lastCtrlUs) * 1e-6f;
     lastCtrlUs = nowUs;
 
-    const float tSec = (float)(millis() - bootMs) * 1e-3f;
+    // --- 1. console inputs
+    const float thr = thr_read(&throttle);
+    if (btn_pressed(&btnScnNext)) {
+      scn_next(&scn);
+      Serial.printf("# scenario -> %s\n", scn_name(&scn));
+    }
+    if (btn_pressed(&btnScnRun)) {
+      scn_start(&scn);
+      Serial.printf("# run %s\n", scn_name(&scn));
+    }
+    btn_pressed(&btnBrake);                 // update the debounce state
+    const bool brakePedal = btn_held(&btnBrake);
 
-    // --- 1. where should we be going?
-    bool hazard = false;
-#if SCENARIO_ENABLED
-    vTargetRaw = scenarioSpeed(tSec, &hazard);
-#else
-    vTargetRaw = SCENARIO_CRUISE_MPS;
-#endif
-    // Rate-limit the setpoint. An emergency stop is allowed to use the
-    // full braking authority; normal changes use the comfort limit.
-    const float limit = hazard ? A_BRAKE_MPS2 : A_MAX_MPS2;
-    vTarget = rate_limit(vTargetRaw, vTarget, limit, dt);
-    flagHazard = hazard;
+    // --- 2. what should the lead be doing?
+    scn_update(&scn, thr, brakePedal);
 
-    // --- 2. measure
+    // Rate-limit the setpoint. A declared emergency gets the full braking
+    // limit; everything else uses the comfort limit.
+    const float limit = scn.hazard ? A_BRAKE_MPS2 : A_MAX_MPS2;
+    vTarget = rate_limit(scn.cmd_speed, vTarget, limit, dt);
+
+    // --- 3. measure
     vio_update(dt);
     const float v = vio_speed();
 
-    // --- 3. inner speed loop
+    // --- 4. inner speed loop
     float u = pid_step(&speedPid, vTarget, v);
 #if ENABLE_LEADLAG
     u = clampf(ll_step(&leadLag, u), PID_U_MIN, PID_U_MAX);
 #endif
     vio_set_duty(u);
 
-    // --- 4. estimate our own acceleration and decide "am I braking?"
+    // --- 5. own acceleration, and "am I braking?"
     const float accel = diff_step(&accelEst, v);
     //  Braking is a DECELERATION statement, not a "going slow" statement.
-    //  (The handover draft had `braking = speed < 3.0`, which flags a
+    //  (The original draft had `braking = speed < 3.0`, which flags a
     //  slow-but-steady vehicle as braking and misses a fast vehicle that
-    //  has just stamped on the pedal -- exactly backwards for the thing
-    //  the follower needs to know.)
-    flagBraking = (accel < -0.15f) || (vTargetRaw < v - 0.05f) || hazard;
+    //  has just stamped on the pedal -- exactly backwards for the one
+    //  thing the follower needs to know.)
+    flagBraking = (accel < -0.08f) || (scn.cmd_speed < v - 0.02f)
+                  || scn.hazard || brakePedal;
 
     vio_status_led(flagBraking);
   }
 
-  // ===== V2V broadcast task ==========================================
   const uint32_t nowMs = millis();
+
+  // ===== V2V broadcast task ==========================================
   if (nowMs - lastTxMs >= (uint32_t)(1000 / V2V_TX_HZ)) {
     lastTxMs = nowMs;
-    v2vBroadcast(vio_speed(), accelEst.lp.y, flagBraking, flagHazard);
+    v2vBroadcast(vio_speed(), accelEst.lp.y, flagBraking, scn.hazard);
+  }
+
+  // ===== HMI task ====================================================
+  if (nowMs - lastHmiMs >= (uint32_t)(1000 / HMI_UPDATE_HZ)) {
+    lastHmiMs = nowMs;
+    hmi_draw_lead(scn_name(&scn), scn.running, scn.elapsed_s,
+                  throttle.value, vio_speed(), scn.cmd_speed,
+                  flagBraking, scn.tx_enabled);
+    hmi_set_brake_lights(flagBraking);
   }
 
   // ===== telemetry task ==============================================
   if (nowMs - lastTelemMs >= (uint32_t)(1000 / TELEM_HZ)) {
     lastTelemMs = nowMs;
-    Serial.printf("L,%lu,%.4f,%.4f,%.4f,%.4f,%d,%d,%lu,%lu,%lu\n",
-                  (unsigned long)(nowMs - bootMs),
+    Serial.printf("L,%lu,%.4f,%.4f,%.4f,%.4f,%d,%d,%d,%d,%.3f,%d,"
+                  "%lu,%lu,%lu,%lu\n",
+                  (unsigned long)nowMs,
                   vio_speed(), vTarget, accelEst.lp.y, vio_last_duty(),
-                  flagBraking ? 1 : 0, flagHazard ? 1 : 0,
+                  flagBraking ? 1 : 0, scn.hazard ? 1 : 0,
+                  (int)scn.id, scn.running ? 1 : 0,
+                  throttle.value, scn.tx_enabled ? 1 : 0,
                   (unsigned long)seqCounter,
-                  (unsigned long)txOk, (unsigned long)txFail);
+                  (unsigned long)txOk, (unsigned long)txFail,
+                  (unsigned long)txSuppressed);
   }
 }

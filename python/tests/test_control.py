@@ -240,25 +240,29 @@ def test_gap_kinematics_is_an_integrator():
 # =====================================================================
 def test_time_gap_scales_with_speed():
     """The defining property: it is a TIME gap, not a distance gap."""
-    gp = GapPolicy(t_gap=1.5, d_standstill=0.2)
-    assert abs(gp.desired_gap(0.0) - 0.20) < 1e-9
-    assert abs(gp.desired_gap(0.4) - 0.80) < 1e-9
-    assert abs(gp.desired_gap(0.6) - 1.10) < 1e-9
+    gp = GapPolicy(t_gap=1.5, d_standstill=0.20)
+    assert abs(gp.desired_gap(0.00) - 0.20) < 1e-9
+    assert abs(gp.desired_gap(0.40) - 0.80) < 1e-9   # cruise -> 80 cm
+    assert abs(gp.desired_gap(0.60) - 1.10) < 1e-9
 
 
 def test_degraded_link_opens_the_gap():
     """Losing V2V must make the follower MORE conservative, never less."""
     gp = GapPolicy(t_gap=1.5, t_gap_degraded=2.2)
-    assert gp.desired_gap(0.4, degraded=True) > gp.desired_gap(0.4, degraded=False)
+    assert gp.desired_gap(0.40, degraded=True) > gp.desired_gap(0.40, degraded=False)
 
 
 def test_gap_policy_equilibrium_is_the_desired_gap():
     """At steady state with a matched lead speed, v_tgt == v_lead exactly
     when the gap equals the desired gap."""
-    gp = GapPolicy(t_gap=1.5, d_standstill=0.2, k_gap=0.9)
-    v = 0.4
+    gp = GapPolicy(t_gap=1.5, d_standstill=0.20, k_gap=0.9, v_max=0.60)
+    v = 0.40                      # cruise, inside v_max
     d_des = gp.desired_gap(v)
     assert abs(gp.target_speed(v_lead=v, gap=d_des, v_follow=v) - v) < 1e-9
+
+    # and the clamp must still bite above v_max, or a large gap error could
+    # command a speed the vehicle cannot reach
+    assert gp.target_speed(v_lead=0.60, gap=5.0, v_follow=0.40) == 0.60
 
 
 def test_v2v_flag_brakes_before_ttc_would():
@@ -392,9 +396,11 @@ def test_twin_metrics_are_sane():
 
 
 def test_lead_scenario_matches_the_firmware_shape():
+    cruise = 0.40                                 # cruise speed
     assert lead_scenario(1.0)[0] == 0.0           # stopped at the start
-    assert lead_scenario(8.0)[0] == 0.40          # cruising
-    assert lead_scenario(14.0)[0] == 0.18         # gentle slowdown
+    assert lead_scenario(8.0)[0] == cruise        # cruising
+    assert lead_scenario(14.0)[0] < cruise        # gentle slowdown
+    assert lead_scenario(14.0)[0] > 0.0           # ...but still moving
     assert lead_scenario(26.0) == (0.0, True)     # emergency stop + hazard
     assert lead_scenario(43.0)[0] == lead_scenario(1.0)[0]   # wraps at 42 s
 
@@ -414,9 +420,29 @@ def test_parse_follower_line():
 
 
 def test_parse_lead_line():
-    rec = parse_line("L,500,0.40,0.40,0.0,0.65,0,0,100,99,1")
+    #  t_ms  v    v_tgt accel duty brk haz scn run thr tx seq  ok fail supp
+    rec = parse_line("L,500,0.15,0.15,0.0,0.65,0,0,2,1,0.42,1,100,99,1,0")
     assert isinstance(rec, LeadRecord)
     assert rec.seq == 100 and abs(rec.tx_fail_pct - 1.0) < 1e-6
+    assert rec.scn == 2 and rec.scn_name == "PREDICT"
+    assert rec.running == 1 and rec.tx_on == 1
+    assert abs(rec.throttle - 0.42) < 1e-9
+
+
+def test_lead_line_without_optional_trailing_columns_still_parses():
+    """A golden run recorded before a column was added must still replay.
+    Recorded runs outlive firmware revisions."""
+    rec = parse_line("L,500,0.15,0.15,0.0,0.65,0,0,2,1,0.42,1,100,99,1")
+    assert isinstance(rec, LeadRecord)
+    assert rec.tx_suppressed == 0
+
+
+def test_follower_line_without_scenario_column_still_parses():
+    line = ("F,1234,0.270,0.270,0.0,99.0,0.150,0.150,0.150,0.62,"
+            "2,0,0,0.1,0.2,0.0,500,3,1")
+    rec = parse_line(line)
+    assert isinstance(rec, FollowerRecord)
+    assert rec.scn == 0
 
 
 def test_parser_survives_garbage():

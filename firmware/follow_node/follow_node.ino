@@ -46,6 +46,8 @@
 #include "filters.h"
 #include "pid.h"
 #include "vehicle_io.h"
+#include "scenario.h"
+#include "hmi.h"
 
 #define V2V_WIFI_CHANNEL  1      // MUST MATCH THE LEAD NODE
 
@@ -73,11 +75,12 @@ typedef struct {
   volatile float    speed;
   volatile float    accel;
   volatile uint8_t  flags;
+  volatile uint8_t  scenario;
   volatile uint32_t seq;
   volatile uint32_t rxMs;
   volatile bool     fresh;
 } V2VRx;
-static V2VRx v2v = {0, 0, 0, 0, 0, false};
+static V2VRx v2v = {0, 0, 0, 0, 0, 0, false};
 
 static portMUX_TYPE v2vMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -114,6 +117,12 @@ static uint32_t lastCtrlUs  = 0;
 static uint32_t lastTelemMs = 0;
 static uint32_t bootMs      = 0;
 static bool     brakeLatched = false;
+static uint8_t  leadScenario = 0;
+static float    hilGap        = HIL_GAP_INITIAL_M;
+static float    obstacleM     = ULTRA_MAX_M;
+static uint8_t  obstacleCount = 0;
+static bool     obstacleTrip  = false;
+static uint32_t lastHmiMs    = 0;
 static uint32_t modeEnteredMs = 0;
 
 // =====================================================================
@@ -134,6 +143,7 @@ static void onReceive(V2V_RECV_CB_ARGS) {
   v2v.speed  = p.speed_mps;
   v2v.accel  = p.accel_mps2;
   v2v.flags  = p.flags;
+  v2v.scenario = p.scenario;
   v2v.seq    = p.seq;
   v2v.rxMs   = millis();
   v2v.fresh  = true;
@@ -210,8 +220,9 @@ void setup() {
 
   vio_begin();
 #if SIM_PLANT
-  vio_sim_set_gap(1.00f);          // start one metre behind
+  vio_sim_set_gap(HIL_GAP_INITIAL_M);
 #endif
+  hilGap = HIL_GAP_INITIAL_M;
 
   pid_init(&speedPid, PID_KP, PID_KI, PID_KD, PID_N_DERIV,
            PID_U_MIN, PID_U_MAX, CTRL_DT);
@@ -219,6 +230,8 @@ void setup() {
   med3_init(&rangeMed);
   lp_init(&rangeLp, ULTRA_LPF_FC_HZ, CTRL_DT);
   diff_init(&rangeDiff, CLOSING_LPF_FC_HZ, CTRL_DT);
+
+  hmi_begin("FOLLOWER");
 
   if (!v2vBegin()) {
     Serial.println("# FATAL: ESP-NOW init failed");
@@ -229,7 +242,7 @@ void setup() {
   // Telemetry schema -- the Python side parses this header, so the two
   // never drift out of sync.
   Serial.println("# TELEM_HDR,t_ms,d,d_des,closing,ttc,v,v_tgt,v_lead,duty,"
-                 "mode,link,brake,p,i,dterm,pkt_good,pkt_lost,pkt_bad");
+                 "mode,link,brake,p,i,dterm,pkt_good,pkt_lost,pkt_bad,scn,obst");
 
   bootMs     = millis();
   lastCtrlUs = micros();
@@ -252,6 +265,7 @@ void loop() {
   portENTER_CRITICAL(&v2vMux);
   const float   leadSpeed = v2v.speed;
   const uint8_t leadFlags = v2v.flags;
+  leadScenario            = v2v.scenario;
   portEXIT_CRITICAL(&v2vMux);
 
   const bool linkUsable  = (link != LINK_LOST);
@@ -262,20 +276,50 @@ void loop() {
   // 2. SENSE
   // -------------------------------------------------------------------
   vio_update(dt);
-  const float v = vio_speed();
+  const float v = vio_speed();          // REAL encoder when SIM_PLANT == 0
 
-#if SIM_PLANT
-  // In sim the gap comes from integrating relative velocity. If the link
-  // is down we have no lead speed, so the gap simply stops updating --
-  // which is realistic: that IS what losing your only information source
-  // looks like.
+  // ---- inter-vehicle gap -------------------------------------------
+#if GAP_SOURCE == GAP_FROM_HIL
+  //  Hardware-in-the-loop gap: d(gap)/dt = v_lead - v_follow, integrated
+  //  using the follower's REAL measured speed and the lead's V2V-reported
+  //  speed. The follower's powertrain and sensing are real; the road is
+  //  modelled.
+  //
+  //  If the link is down we have no lead speed, so the gap stops updating.
+  //  That is not a cheat -- it is exactly what losing your only source of
+  //  information about the vehicle ahead looks like, and it is why the
+  //  degraded mode widens the time gap instead of carrying on regardless.
+  hilGap += ((linkUsable ? leadSpeed : v) - v) * dt;
+  hilGap = clampf(hilGap, 0.0f, ULTRA_MAX_M);
+  dMeas = hilGap;
+  const bool rangeOk = true;
+#elif SIM_PLANT
   vio_sim_integrate_gap(linkUsable ? leadSpeed : v, v, dt);
   dMeas = lp_step(&rangeLp, med3_step(&rangeMed, vio_range()));
+  const bool rangeOk = vio_range_ok();
 #else
-  dMeas = vio_range();            // already median+LPF filtered in vio_update
+  //  Direct measurement: the HC-SR04 is the gap sensor. Already
+  //  median-filtered and low-passed inside vio_update().
+  dMeas = vio_range();
+  const bool rangeOk = vio_range_ok();
 #endif
 
-  const bool rangeOk = vio_range_ok();
+  // ---- forward obstacle sensor -------------------------------------
+  //  Only meaningful when a real sensor is fitted AND it is not already
+  //  serving as the gap sensor.
+#if OBSTACLE_ENABLE && !SIM_PLANT && (GAP_SOURCE == GAP_FROM_HIL)
+  obstacleM = vio_range();
+  if (vio_range_ok() && obstacleM < OBSTACLE_TRIP_M) {
+    if (obstacleCount < 255) obstacleCount++;
+    if (obstacleCount >= OBSTACLE_CONFIRM_N) obstacleTrip = true;
+  } else {
+    obstacleCount = 0;
+    if (!vio_range_ok() || obstacleM > OBSTACLE_CLEAR_M) obstacleTrip = false;
+  }
+#else
+  obstacleTrip = false;
+  obstacleM    = ULTRA_MAX_M;
+#endif
 
   // closing rate: positive when the gap is SHRINKING
   closingMps = -diff_step(&rangeDiff, dMeas);
@@ -297,13 +341,18 @@ void loop() {
   const bool dangerTtc   = (ttc < TTC_BRAKE_S);
   const bool dangerFloor = rangeOk && (dMeas < D_BRAKE_FLOOR_M);
 
+  //  A confirmed physical obstacle in front of the car is an
+  //  unconditional emergency. It is the one danger signal that owes
+  //  nothing to the radio or to the gap model: a real sensor seeing a
+  //  real object.
   const bool emergency = leadHazard
+                      || obstacleTrip
                       || (ttc < TTC_EMERGENCY_S)
                       || (rangeOk && dMeas < D_BRAKE_FLOOR_M * 0.6f);
 
   // Hysteresis on release, so we do not chatter in and out of braking
   // right at the threshold.
-  bool danger = dangerV2V || dangerTtc || dangerFloor;
+  bool danger = dangerV2V || dangerTtc || dangerFloor || obstacleTrip;
   if (brakeLatched && !danger) {
     const bool clearedTtc = (ttc > TTC_BRAKE_S * BRAKE_RELEASE_HYST);
     const bool clearedGap = (dMeas > D_BRAKE_FLOOR_M * BRAKE_RELEASE_HYST);
@@ -413,7 +462,18 @@ void loop() {
   vio_status_led(mode == MODE_PREDICT || mode == MODE_EMERG);
 
   // -------------------------------------------------------------------
-  // 8. TELEMETRY
+  // 8. HMI  -- compiled out entirely when HMI_ENABLE_* are 0
+  // -------------------------------------------------------------------
+  if (nowMs - lastHmiMs >= (uint32_t)(1000 / HMI_UPDATE_HZ)) {
+    lastHmiMs = nowMs;
+    hmi_set_mode_bar((int)mode, (int)link, brakeLatched);
+    hmi_draw_follower(MODE_NAME[(int)mode], LINK_NAME[(int)link],
+                      SCENARIO_NAMES[leadScenario < SCN_COUNT ? leadScenario : 0],
+                      dMeas, dDes, v, vLeadEst, ttc, pktLost);
+  }
+
+  // -------------------------------------------------------------------
+  // 9. TELEMETRY
   // -------------------------------------------------------------------
   if (nowMs - lastTelemMs >= (uint32_t)(1000 / TELEM_HZ)) {
     lastTelemMs = nowMs;
@@ -425,6 +485,7 @@ void loop() {
       v, vTarget, vLeadEst, u,
       (int)mode, (int)link, brakeLatched ? 1 : 0,
       speedPid.p_term, speedPid.i_term, speedPid.d_term,
-      (unsigned long)pktGood, (unsigned long)pktLost, (unsigned long)pktBad);
+      (unsigned long)pktGood, (unsigned long)pktLost, (unsigned long)pktBad,
+      (int)leadScenario, obstacleM);
   }
 }

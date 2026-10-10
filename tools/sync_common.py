@@ -34,9 +34,11 @@ COMMON = ROOT / "firmware" / "common"
 TARGETS = {
     ROOT / "firmware" / "lead_node": [
         "config.h", "v2v_protocol.h", "filters.h", "pid.h", "vehicle_io.h",
+        "scenario.h", "hmi.h",
     ],
     ROOT / "firmware" / "follow_node": [
         "config.h", "v2v_protocol.h", "filters.h", "pid.h", "vehicle_io.h",
+        "scenario.h", "hmi.h",
     ],
     ROOT / "firmware" / "tools" / "step_response": [
         "config.h", "filters.h",

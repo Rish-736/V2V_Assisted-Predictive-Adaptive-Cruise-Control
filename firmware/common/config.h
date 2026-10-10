@@ -36,10 +36,59 @@
 // =====================================================================
 //  2. VEHICLE / PLANT LIMITS
 // =====================================================================
-#define V_MAX_MPS              0.60f   // top speed of the scale car [m/s]
+//  FULL-RANGE values, restored after the short-track plan was dropped. On
+//  the bench the gap is HIL-integrated rather than physically traversed
+//  (section 2b), so no track length constrains the spacing and there is no
+//  reason to slow the vehicle down. At a 0.40 m/s cruise the motor turns at
+//  about 118 rpm, which is clearly visible, and clearly audible when it
+//  brakes.
+#define V_MAX_MPS              0.60f   // top speed [m/s]
 #define V_STANDSTILL_MPS       0.03f   // below this we call it stopped
 #define A_MAX_MPS2             0.80f   // comfort accel limit [m/s^2]
 #define A_BRAKE_MPS2           1.60f   // hard-braking decel limit [m/s^2]
+
+// =====================================================================
+//  2b. GAP SOURCE  -- how the follower learns the inter-vehicle distance
+// =====================================================================
+//  GAP_FROM_ULTRASONIC : the HC-SR04 measures the gap directly. Needs a
+//                        physical lead vehicle at the real spacing, i.e. a
+//                        track. This is the full two-vehicle build.
+//
+//  GAP_FROM_HIL        : the gap is integrated from the relative velocity,
+//                        d(gap)/dt = v_lead - v_follow, using the
+//                        follower's REAL MEASURED speed and the lead's
+//                        V2V-reported speed. Hardware-in-the-loop: the
+//                        powertrain and the sensing are real, the road is
+//                        modelled. This is the bench build, and it frees
+//                        the ultrasonic for a job the audience can
+//                        actually see (section 2c).
+//
+//  This is INDEPENDENT of SIM_PLANT. On the bench we run SIM_PLANT 0
+//  (real motor, real encoder) together with GAP_FROM_HIL.
+#define GAP_FROM_ULTRASONIC    0
+#define GAP_FROM_HIL           1
+#define GAP_SOURCE             GAP_FROM_HIL
+#define HIL_GAP_INITIAL_M      1.00f   // where the follower starts
+
+// =====================================================================
+//  2c. FORWARD OBSTACLE SENSOR
+// =====================================================================
+//  With the gap coming from HIL, the real HC-SR04 gets a separate and far
+//  more legible job: forward obstacle detection. Put your hand in front of
+//  it and the follower emergency-brakes.
+//
+//  Nobody needs that explained. It is a real sensor, a real trip and a
+//  real actuator response, and it reads instantly to any audience -- worth
+//  more in a five-minute review than a subtle gap-regulation argument
+//  nobody can see from two metres away.
+//
+//  A confirmation count is required because a single spurious short read
+//  from an ultrasonic sensor is common, and one of those must not slam the
+//  brakes on. Hysteresis on release stops it chattering.
+#define OBSTACLE_ENABLE        1
+#define OBSTACLE_TRIP_M        0.30f   // closer than this -> emergency
+#define OBSTACLE_CLEAR_M       0.40f   // must exceed this to release
+#define OBSTACLE_CONFIRM_N     3       // consecutive reads before tripping
 
 // =====================================================================
 //  3. OUTER LOOP -- constant time-gap spacing policy
@@ -133,7 +182,7 @@
 //  triggers phantom braking. So: median-of-3 to kill spikes, then a
 //  first-order low-pass, and only then differentiate.
 #define ULTRA_MIN_M            0.03f
-#define ULTRA_MAX_M            2.50f
+#define ULTRA_MAX_M            1.20f   // beyond the bench is a false echo
 #define ULTRA_MEDIAN_N         3
 #define ULTRA_LPF_FC_HZ        4.0f    // range low-pass corner
 #define CLOSING_LPF_FC_HZ      2.0f    // closing-rate low-pass corner
@@ -147,6 +196,17 @@
 #define ENC_GEAR_RATIO         34.0f   // gearbox reduction
 #define WHEEL_DIAMETER_M       0.065f
 #define ENC_SPEED_LPF_FC_HZ    8.0f
+
+//  SPEED MEASUREMENT WINDOW.
+//  At a 0.15 m/s cruise this encoder gives only ~5.5 pulses per 20 ms control
+//  tick, which quantises the speed estimate to ~2.7 cm/s -- about 18% of
+//  cruise. Differencing one tick at a time therefore feeds mostly
+//  quantisation noise into the PID.
+//  Fix: accumulate pulses over N ticks and divide by the elapsed time, while
+//  still RUNNING the loop at CTRL_HZ. Costs a little phase lag, buys N times
+//  the resolution. At this speed that is the right trade.
+//  Set to 1 to go back to per-tick differencing.
+#define ENC_SPEED_WINDOW_TICKS 3       // 3 x 20 ms = 60 ms window
 
 // =====================================================================
 // 11. PIN MAP  (ignored entirely when SIM_PLANT == 1)
@@ -168,12 +228,46 @@
 #define PIN_STATUS_LED         2
 
 // =====================================================================
+// 11b. LEAD CONSOLE  (lead node only)
+// =====================================================================
+//  The lead vehicle needs no motor -- it only needs to broadcast. So it is
+//  built as a driver's console instead: a throttle pot you turn by hand, a
+//  brake button, and scenario buttons. Its vehicle physics runs in
+//  SIM_PLANT. That halves the drivetrain hardware for the demo.
+#define LEAD_ENABLE_POT        1       // 0 -> scenarios only, no throttle
+#define PIN_LEAD_POT           36      // ADC1_CH0, input-only -- fine for ADC
+#define PIN_LEAD_BRAKE         32      // INPUT_PULLUP, button to GND
+#define PIN_LEAD_SCN_NEXT      33      // cycle scenario forward
+#define PIN_LEAD_SCN_RUN       25      // start/restart the selected scenario
+#define POT_DEADBAND           0.02f   // ignore pot jitter below this
+#define POT_LPF_FC_HZ          3.0f    // the pot is noisy; filter it
+#define BTN_DEBOUNCE_MS        40
+
+// =====================================================================
+// 11c. HMI  -- every item here is optional, drop it with one #define
+// =====================================================================
+//  Both default to 0 so the firmware COMPILES AND RUNS with no extra
+//  libraries installed and no display wired. Turn them on once the parts
+//  are in hand and the libraries installed. See docs/DEMO_PLAN.md section 6.
+#define HMI_ENABLE_OLED        0       // needs Adafruit_SSD1306 + Adafruit_GFX
+#define HMI_ENABLE_LEDS        0       // needs Adafruit_NeoPixel
+#define PIN_OLED_SDA           21
+#define PIN_OLED_SCL           22
+#define OLED_I2C_ADDR          0x3C
+#define OLED_W                 128
+#define OLED_H                 64
+#define PIN_LED_BAR            4
+#define LED_BAR_COUNT          5       // FOLLOW PREDICT EMERG V2VOK V2VLOST
+#define LED_BAR_BRIGHTNESS     60      // keep low, they are blinding at 255
+#define HMI_UPDATE_HZ          10      // OLED redraw is slow, do not rush it
+
+// =====================================================================
 // 12. SIM-ONLY: lead vehicle scenario script
 // =====================================================================
 //  A repeatable speed profile so every demo run is identical and the
 //  digital-twin comparison is meaningful. Times are seconds from boot.
 #define SCENARIO_ENABLED       1
-#define SCENARIO_CRUISE_MPS    0.40f
+#define SCENARIO_CRUISE_MPS    0.40f   // cruise [m/s]
 #define SCENARIO_T_START       3.0f    // begin cruising
 #define SCENARIO_T_BRAKE1      12.0f   // first gentle slowdown
 #define SCENARIO_T_RESUME      17.0f

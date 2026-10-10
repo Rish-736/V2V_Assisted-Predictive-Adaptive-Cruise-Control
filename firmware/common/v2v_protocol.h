@@ -15,6 +15,10 @@
 //     built with different core versions -- a real failure we can detect.
 //   * version + magic make a mismatched build fail loudly instead of
 //     silently decoding garbage into a braking command.
+//   * scenario rides along so the follower's telemetry -- and therefore
+//     every recorded log and every dashboard plot -- is annotated with
+//     which demo scenario produced it, without the follower needing any
+//     scenario logic of its own.
 // =====================================================================
 #ifndef V2V_PROTOCOL_H
 #define V2V_PROTOCOL_H
@@ -47,7 +51,8 @@ typedef struct __attribute__((packed)) {
   float    speed_mps;    // lead's own measured forward speed
   float    accel_mps2;   // lead's filtered acceleration (negative = slowing)
   uint8_t  flags;        // V2V_FLAG_*
-  uint8_t  _reserved[3]; // keeps float alignment sane + room to grow
+  uint8_t  scenario;     // ScenarioId -- annotates every log automatically
+  uint8_t  _reserved[2]; // keeps float alignment sane + room to grow
   uint16_t crc;          // CRC16-CCITT over all preceding bytes
 } V2VPacket;
 
@@ -74,7 +79,7 @@ static inline void v2v_seal(V2VPacket *p, uint8_t node_id) {
   p->magic   = V2V_MAGIC;
   p->version = V2V_PROTO_VERSION;
   p->node_id = node_id;
-  p->_reserved[0] = p->_reserved[1] = p->_reserved[2] = 0;
+  p->_reserved[0] = p->_reserved[1] = 0;
   p->crc = v2v_crc16((const uint8_t *)p, V2V_CRC_SPAN);
 }
 

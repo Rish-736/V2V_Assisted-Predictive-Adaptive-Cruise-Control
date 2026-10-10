@@ -128,6 +128,8 @@ static inline bool  vio_range_ok(void) { return vio_range_valid; }
 
 static volatile int32_t vio_enc_count = 0;
 static int32_t  vio_enc_prev = 0;
+static uint8_t  vio_win_n    = 0;      // ticks accumulated in this window
+static float    vio_win_dt   = 0.0f;   // true elapsed time of the window
 static LowPass  vio_speed_lp;
 static Median3  vio_range_med;
 static LowPass  vio_range_lp;
@@ -223,14 +225,25 @@ static inline float vio_ping_raw(void) {
 }
 
 static inline void vio_update(float dt) {
-  // ---- speed from encoder deltas
-  noInterrupts();
-  const int32_t c = vio_enc_count;
-  interrupts();
-  const int32_t d = c - vio_enc_prev;
-  vio_enc_prev = c;
-  const float raw = ((float)d * vio_m_per_pulse()) / dt;
-  vio_speed_mps = lp_step(&vio_speed_lp, raw);
+  // ---- speed from encoder deltas, over a SLIDING WINDOW
+  //  At a 0.15 m/s cruise this encoder yields only ~5.5 pulses per 20 ms
+  //  tick, so differencing every tick quantises the speed estimate to
+  //  ~2.7 cm/s -- about 18% of cruise -- and feeds mostly quantisation
+  //  noise to the PID. Accumulating over ENC_SPEED_WINDOW_TICKS ticks and
+  //  dividing by the true elapsed time gives N times the resolution for a
+  //  little phase lag. The control loop still runs at CTRL_HZ.
+  vio_win_dt += dt;
+  if (++vio_win_n >= ENC_SPEED_WINDOW_TICKS) {
+    noInterrupts();
+    const int32_t c = vio_enc_count;
+    interrupts();
+    const int32_t d = c - vio_enc_prev;
+    vio_enc_prev = c;
+    const float raw = ((float)d * vio_m_per_pulse()) / vio_win_dt;
+    vio_speed_mps = lp_step(&vio_speed_lp, raw);
+    vio_win_n  = 0;
+    vio_win_dt = 0.0f;
+  }
 
   // ---- range: median -> low-pass, with miss counting
   const float r = vio_ping_raw();

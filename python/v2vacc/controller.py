@@ -241,6 +241,7 @@ class GapPolicy:
     policy a disturbance grows as it propagates down a platoon.
     """
 
+    # must match firmware/common/config.h section 3
     t_gap: float = 1.50
     t_gap_degraded: float = 2.20
     d_standstill: float = 0.20
@@ -332,7 +333,7 @@ class FollowerController:
     v_standstill: float = 0.03
     a_max: float = 0.80
     a_brake: float = 1.60
-    range_max: float = 2.50
+    range_max: float = 1.20
     use_leadlag: bool = False
     leadlag: LeadLag = field(default_factory=LeadLag)
 
