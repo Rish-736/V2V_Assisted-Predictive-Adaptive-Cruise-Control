@@ -123,6 +123,7 @@ python/
   v2vacc/
     plant.py           motor + gap-kinematics models
     controller.py      Python MIRROR of the firmware control laws
+    statespace.py      3-state model, LQR, controllability/observability
     twin.py            digital twin: open-loop (live) + closed-loop (offline)
     telemetry.py       telemetry parser
     serial_link.py     threaded serial reader + log replay
@@ -130,10 +131,11 @@ python/
     sim_only.py        offline closed-loop sim + the V2V-vs-no-V2V study
     sysid_fit.py       fit the motor transfer function from step data
     design_control.py  PID + lead-lag design, margins, root locus, Bode
+    state_space_lqr.py state-space + LQR design, and LQR vs PID comparison
     dashboard.py       live dashboard with the twin plotted alongside
     log_serial.py      capture serial to a file
   tests/
-    test_control.py    36 tests pinning the control-law behaviour
+    test_control.py    49 tests pinning the control-law behaviour
 
 matlab/
   sysid_fit.m          MATLAB companion to the fitter
@@ -247,7 +249,7 @@ examiner will actually ask.
 | System-identification pipeline | written, verified against synthetic data with known parameters |
 | Control design (margins, lead-lag) | written, gain margin cross-checked analytically |
 | Real motor, encoder, ultrasonic | **blocked on hardware** — `SIM_PLANT 1` stands in |
-| State-space model + stability proof | not started (Review 3 stretch goal) |
+| State-space model + LQR | done: controllable, Kalman margins verified, 3.9x tighter gap holding than the PID cascade at equal control effort |
 | String stability for 3+ vehicles | not started (natural extension) |
 
 See `docs/REVIEW_CHECKLIST.md` for what to have ready at each review.

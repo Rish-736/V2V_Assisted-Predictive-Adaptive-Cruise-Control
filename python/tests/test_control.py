@@ -32,6 +32,8 @@ from v2vacc.controller import (PID, Gains, LowPass, Median3, Differentiator,
 from v2vacc.plant import FirstOrderPlant, PlantParams, VehicleKinematics
 from v2vacc.twin import ClosedLoopTwin, compare, lead_scenario
 from v2vacc.telemetry import parse_line, FollowerRecord, LeadRecord
+from v2vacc.statespace import (ACCStateSpace, lqr, solve_care, expm,
+                               controllability_matrix, matrix_rank)
 
 
 # =====================================================================
@@ -403,6 +405,112 @@ def test_lead_scenario_matches_the_firmware_shape():
     assert lead_scenario(14.0)[0] > 0.0           # ...but still moving
     assert lead_scenario(26.0) == (0.0, True)     # emergency stop + hazard
     assert lead_scenario(43.0)[0] == lead_scenario(1.0)[0]   # wraps at 42 s
+
+
+# =====================================================================
+#  State space / LQR
+# =====================================================================
+def _ss():
+    return ACCStateSpace(PlantParams(), t_gap=1.5, d_standstill=0.20)
+
+
+def test_statespace_is_controllable():
+    c = _ss().controllability()
+    assert c["controllable"], f"rank {c['rank']}/{c['n']}"
+
+
+def test_statespace_full_state_is_observable():
+    assert _ss().observability()["observable"]
+
+
+def test_gap_only_measurement_is_NOT_observable():
+    """The instructive failure: measuring only the gap loses relative
+    velocity, so a gap-only ACC would need an observer. We do not, because
+    V2V hands us the lead speed directly."""
+    o = _ss().observability(_ss().C_gap_only())
+    assert not o["observable"] and o["rank"] == 2
+
+
+def test_lead_speed_as_a_state_is_NOT_controllable():
+    """No amount of follower throttle changes what the lead does, so v_lead
+    must be a disturbance, not a state. Modelling it as a state silently
+    produces a meaningless LQR design."""
+    c4 = _ss().controllability_with_lead_as_state()
+    assert not c4["controllable"] and c4["rank"] == 3
+
+
+def test_care_residual_is_essentially_zero():
+    """The Riccati solution must actually satisfy the equation. If this
+    drifts, every gain and every pole downstream is wrong."""
+    import numpy as np
+    ss = _ss()
+    r = ss.design()
+    A, B, Q, R = ss.A, ss.B, r.Q, r.R
+    res = A.T @ r.P + r.P @ A - r.P @ B @ np.linalg.inv(R) @ B.T @ r.P + Q
+    assert np.max(np.abs(res)) < 1e-8
+    assert np.all(np.linalg.eigvals(r.P) > 0), "P must be positive definite"
+
+
+def test_lqr_closed_loop_is_stable():
+    import numpy as np
+    r = _ss().design()
+    assert np.all(np.asarray(r.poles).real < 0), f"unstable: {r.poles}"
+
+
+def test_lqr_satisfies_the_kalman_inequality():
+    """|1 + L(jw)| >= 1 is what gives LQR its >=60 deg phase margin and
+    infinite gain margin. If it fails, the model or design is broken."""
+    import numpy as np
+    ss = _ss()
+    r = ss.design()
+    K = np.asarray(r.K)
+    worst = min(abs(1.0 + complex((K @ np.linalg.solve(1j * w * np.eye(3) - ss.A,
+                                                       ss.B))[0, 0]))
+                for w in np.logspace(-3, 3, 800))
+    assert worst >= 0.99, f"min |1+L| = {worst:.4f}"
+
+
+def test_lqr_drives_spacing_error_to_zero():
+    """Constant lead speed must give exactly zero steady-state spacing error
+    and a follower speed matching the lead. This is what the integral state
+    is there for -- and it caught a real bug where the disturbance matrix
+    was discretised as E*dt instead of the proper ZOH form."""
+    ss = _ss()
+    r = ss.design()
+    res = ss.simulate(r.K, lambda t: 0.40, duration=40.0, dt=0.02)
+    assert abs(res["e"][-1]) < 1e-3, f"e_ss = {res['e'][-1]}"
+    assert abs(res["v_r"][-1]) < 1e-3
+    assert abs(res["v_f"][-1] - 0.40) < 1e-3
+    assert abs(res["u"][-1] - 0.40 / 0.60) < 1e-3   # u_ss must be v_l / K
+
+
+def test_discretisation_is_consistent_at_small_dt():
+    """Ad -> I + A*dt as dt -> 0. A wrong discretisation is invisible in the
+    gains but ruins every simulation built on them."""
+    import numpy as np
+    ss = _ss()
+    dt = 1e-4
+    Ad, Bd, Ed = ss.discretise(dt, with_disturbance=True)
+    assert np.allclose(Ad, np.eye(3) + ss.A * dt, atol=1e-6)
+    assert np.allclose(Bd, ss.B * dt, atol=1e-6)
+    assert np.allclose(Ed, ss.E * dt, atol=1e-6)
+
+
+def test_expm_matches_a_known_result():
+    import numpy as np
+    # expm(diag(a,b)) = diag(e^a, e^b)
+    M = np.diag([0.5, -1.25])
+    assert np.allclose(expm(M), np.diag([np.exp(0.5), np.exp(-1.25)]), atol=1e-10)
+
+
+def test_tighter_weights_give_larger_gains():
+    """Bryson's rule must behave monotonically, or the weights are not
+    expressing requirements the way we claim they do."""
+    import numpy as np
+    ss = _ss()
+    loose = np.abs(np.asarray(ss.design(*ss.bryson_weights(e_max=0.20)).K).ravel()[0])
+    tight = np.abs(np.asarray(ss.design(*ss.bryson_weights(e_max=0.02)).K).ravel()[0])
+    assert tight > loose
 
 
 # =====================================================================

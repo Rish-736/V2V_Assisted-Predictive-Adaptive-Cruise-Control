@@ -116,7 +116,7 @@ works — see §6.
 - [x] `GAP_SOURCE` switch + HIL gap integration
 - [x] forward obstacle sensor with confirmation count and hysteresis
 - [x] sliding-window encoder speed measurement
-- [ ] state-space model + LQR analysis (report deliverable)
+- [x] state-space model + LQR analysis (report deliverable)
 - [ ] dashboard scenario panel
 
 All of this is testable **today** with `SIM_PLANT 1` on both boards, no motor
