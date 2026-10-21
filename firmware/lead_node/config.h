@@ -193,11 +193,44 @@
 #define ULTRA_MAX_MISSES       5       // consecutive bad reads -> sensor fault
 
 // =====================================================================
-// 10. ENCODER
+// 10. ENCODER / SPEED SENSOR
 // =====================================================================
-#define ENC_PPR                11.0f   // encoder pulses per motor rev (1 ch)
-#define ENC_GEAR_RATIO         34.0f   // gearbox reduction
-#define WHEEL_DIAMETER_M       0.065f
+//  TWO SUPPORTED SETUPS
+//
+//  (a) ENC_SINGLE_CHANNEL 0 -- a proper quadrature encoder motor.
+//      Channel A is counted, channel B gives direction.
+//
+//  (b) ENC_SINGLE_CHANNEL 1 -- a PLAIN DC MOTOR plus a cheap IR slot
+//      sensor (LM393 module) with a slotted disc on the motor shaft.
+//      One channel, so no direction information -- which is fine here,
+//      because the vehicle only ever drives forward. Negative duty is a
+//      brake, never a reverse.
+//
+//  WHY THE DISC MUST GO ON THE MOTOR SHAFT, NOT A WHEEL
+//  A 20-slot disc on a slow geared output shaft (~120 rpm) yields about
+//  2 pulses per 60 ms measurement window, which quantises the speed
+//  estimate to roughly 40% -- the controller would be regulating noise.
+//  The same disc on an ungeared motor shaft at 1000-3000 rpm gives 20-60
+//  pulses per window, i.e. 2-5%, which is better than a typical geared
+//  encoder motor. Fast shaft, always.
+#define ENC_SINGLE_CHANNEL     1
+
+//  THE VIRTUAL DRIVETRAIN
+//  A bare motor on the bench has no gearbox and no wheel, so "speed in
+//  m/s" has to be defined by a scale factor. We model a plausible
+//  drivetrain -- a reduction onto a 65 mm wheel -- and convert shaft
+//  pulses into vehicle speed through it. This is a UNIT CHOICE, not a
+//  fudge: it maps the motor's real, measured shaft speed onto a
+//  realistic vehicle speed range so the gaps and time headways mean
+//  something. Say so plainly if asked.
+//
+//  CALIBRATE IT: run tools/step_response at full duty, read the reported
+//  speed, and scale ENC_GEAR_RATIO until full duty reads close to
+//  V_MAX_MPS. There is a helper that does the arithmetic:
+//      python python/scripts/calibrate_encoder.py --pulses-per-sec <N>
+#define ENC_PPR                20.0f   // slots on the disc (or encoder PPR)
+#define ENC_GEAR_RATIO         30.0f   // VIRTUAL reduction -- calibrate this
+#define WHEEL_DIAMETER_M       0.065f  // virtual wheel
 #define ENC_SPEED_LPF_FC_HZ    8.0f
 
 //  SPEED MEASUREMENT WINDOW.
@@ -221,9 +254,12 @@
 #define PWM_CHANNEL            0
 #define PWM_FREQ_HZ            20000   // 20 kHz -> above audible range
 #define PWM_RESOLUTION_BITS    10      // 0..1023
-// --- quadrature encoder
-#define PIN_ENC_A              34      // input-only pins, use ext. pullups
-#define PIN_ENC_B              35
+// --- encoder / IR slot sensor
+//  With ENC_SINGLE_CHANNEL 1 only PIN_ENC_A is used; leave B unconnected.
+//  Most LM393 modules drive the output actively, so the external pull-up
+//  is only needed for an open-collector encoder.
+#define PIN_ENC_A              34      // input-only pin, use ext. pull-up
+#define PIN_ENC_B              35      // unused when ENC_SINGLE_CHANNEL
 // --- HC-SR04 (follow node only).  ECHO IS 5V -- USE A DIVIDER.
 #define PIN_ULTRA_TRIG         5
 #define PIN_ULTRA_ECHO         18

@@ -135,18 +135,30 @@ static Median3  vio_range_med;
 static LowPass  vio_range_lp;
 
 // metres of wheel travel per encoder pulse
+// Metres of (virtual) wheel travel per encoder pulse.
+// With a bare motor this is the scale factor that turns measured shaft
+// pulses into a vehicle speed -- see ENC_GEAR_RATIO in config.h section 10.
 static inline float vio_m_per_pulse(void) {
   const float pulses_per_wheel_rev = ENC_PPR * ENC_GEAR_RATIO;
   const float wheel_circumference  = (float)M_PI * WHEEL_DIAMETER_M;
   return wheel_circumference / pulses_per_wheel_rev;
 }
 
+#if ENC_SINGLE_CHANNEL
+// Single-channel IR slot sensor: just count edges. There is no direction
+// information and none is needed -- this vehicle only drives forward, and
+// a negative duty is a brake rather than a reverse.
+static void IRAM_ATTR vio_enc_isr(void) {
+  vio_enc_count++;
+}
+#else
 // Quadrature decode on channel A edges, direction from channel B.
 // Half-quadrature (1x) is plenty here and halves the ISR load.
 static void IRAM_ATTR vio_enc_isr(void) {
   if (digitalRead(PIN_ENC_B)) vio_enc_count++;
   else                        vio_enc_count--;
 }
+#endif
 
 static inline void vio_begin(void) {
   pinMode(PIN_STATUS_LED, OUTPUT);
@@ -166,7 +178,9 @@ static inline void vio_begin(void) {
 #endif
 
   pinMode(PIN_ENC_A, INPUT);
+#if !ENC_SINGLE_CHANNEL
   pinMode(PIN_ENC_B, INPUT);
+#endif
   attachInterrupt(digitalPinToInterrupt(PIN_ENC_A), vio_enc_isr, RISING);
 
   pinMode(PIN_ULTRA_TRIG, OUTPUT);

@@ -49,8 +49,12 @@ static volatile int32_t encCount = 0;
 static int32_t encPrev = 0;
 
 static void IRAM_ATTR encIsr(void) {
+#if ENC_SINGLE_CHANNEL
+  encCount++;                     // IR slot sensor: count only, forward-only
+#else
   if (digitalRead(PIN_ENC_B)) encCount++;
   else                        encCount--;
+#endif
 }
 
 static float mPerPulse(void) {
@@ -98,9 +102,12 @@ static void logPhase(float duty, uint32_t durationMs, const char *tag,
 
     const float speed = ((float)d * mPerPulse()) / SAMPLE_DT;
 
-    // CSV: t_ms, duty, speed_mps, enc_count, tag
-    Serial.printf("%lu,%.4f,%.5f,%ld,%s\n",
-                  (unsigned long)(millis() - t0), duty, speed, (long)c, tag);
+    // CSV: t_ms, duty, speed_mps, enc_count, pulses_per_sec, tag
+    //  pulses_per_sec is printed RAW, independent of the virtual-drivetrain
+    //  scale factor, because that is the number encoder calibration needs.
+    const float pps = (float)d / SAMPLE_DT;
+    Serial.printf("%lu,%.4f,%.5f,%ld,%.1f,%s\n",
+                  (unsigned long)(millis() - t0), duty, speed, (long)c, pps, tag);
   }
 }
 
@@ -119,7 +126,9 @@ void setup() {
   motorOff();
 
   pinMode(PIN_ENC_A, INPUT);
+#if !ENC_SINGLE_CHANNEL
   pinMode(PIN_ENC_B, INPUT);
+#endif
   attachInterrupt(digitalPinToInterrupt(PIN_ENC_A), encIsr, RISING);
 
   Serial.println();
@@ -130,7 +139,7 @@ void setup() {
                  WHEEL_DIAMETER_M, ENC_PPR, ENC_GEAR_RATIO);
   Serial.println("# starting in 3 s -- make sure the wheels are clear");
   delay(3000);
-  Serial.println("t_ms,duty,speed_mps,enc_count,tag");
+  Serial.println("t_ms,duty,speed_mps,enc_count,pulses_per_sec,tag");
 
   const uint32_t t0 = millis();
   noInterrupts(); encCount = 0; interrupts();
